@@ -30,7 +30,17 @@ function predict(tree, values, features) {
   return {action: node?.action, path};
 }
 function actionName(action) { return ['stop','bank','0'].includes(String(action).toLowerCase())?'Bankuj':'Rzuć'; }
-if (typeof module !== 'undefined') module.exports = {evaluate, pairDice, predict, actionName};
+const DISCRETE_FEATURES = ['own_claimed','opponent_claimed','summits_pending','free_markers'];
+function splitLabels(feature, threshold) {
+  if (DISCRETE_FEATURES.includes(feature)) return {left:`≤ ${Math.floor(threshold)}`,right:`≥ ${Math.floor(threshold)+1}`};
+  const text=Number(threshold).toLocaleString('pl-PL',{minimumFractionDigits:3,maximumFractionDigits:3});
+  return {left:`≤ ${text}`,right:`> ${text}`};
+}
+function normalizeFeature(feature, value, max) {
+  const n=Math.max(0,Math.min(max,Number(value)||0));
+  return DISCRETE_FEATURES.includes(feature)?Math.floor(n):n;
+}
+if (typeof module !== 'undefined') module.exports = {evaluate, pairDice, predict, actionName, splitLabels, normalizeFeature};
 
 if (typeof document !== 'undefined') {
   const $ = id => document.getElementById(id);
@@ -126,8 +136,8 @@ if (typeof document !== 'undefined') {
   function treeHTML(node,depth=0) {
     if(!node)return '';
     if(node.action!==undefined)return `<div class="leaf ${actionName(node.action)==='Bankuj'?'stop':''}" data-node="${esc(node.id)}"><strong>${actionName(node.action)}</strong><small>Węzeł ${esc(node.id)} · ${esc(node.samples??'—')} próbek</small></div>`;
-    const f=featureName(node.feature);
-    return `<details data-node="${esc(node.id)}" ${depth<2?'open':''}><summary><strong>${esc(names[f]||f)} ≤ ${fmt(node.threshold,3)}</strong><small>${esc(f)} · węzeł ${esc(node.id)} · ${esc(node.samples??'—')} próbek</small></summary><div class="branches"><div class="branch-label">TAK · ≤ ${fmt(node.threshold,3)}</div>${treeHTML(node.left,depth+1)}<div class="branch-label">NIE · &gt; ${fmt(node.threshold,3)}</div>${treeHTML(node.right,depth+1)}</div></details>`;
+    const f=featureName(node.feature), labels=splitLabels(f,node.threshold);
+    return `<details data-node="${esc(node.id)}" ${depth<2?'open':''}><summary><strong>${esc(names[f]||f)} ${esc(labels.left)}</strong><small>${esc(f)} · węzeł ${esc(node.id)} · ${esc(node.samples??'—')} próbek</small></summary><div class="branches"><div class="branch-label">TAK · ${esc(labels.left)}</div>${treeHTML(node.left,depth+1)}<div class="branch-label">NIE · ${esc(labels.right)}</div>${treeHTML(node.right,depth+1)}</div></details>`;
   }
   function updateModel() {
     if(!model)return;
@@ -143,14 +153,14 @@ if (typeof document !== 'undefined') {
   }
   function drawModel() {
     const meta=model.meta||{};model.meta=meta;
-    const scope=document.createElement('p');scope.className='notice';scope.textContent=`Wariant treningowy: zwycięstwo po zdobyciu ${meta.targetClaims||3} kolumn (standardowo: 3). Dorobek modelu jest względny, a EV na planszy liczy surowe kroki. To dwa różne modele wartości.`;
+    const scope=document.createElement('p');scope.className='notice';scope.textContent=`Wariant treningowy: zwycięstwo po zdobyciu ${meta.targetClaims||3} kolumn (standardowo: 3). Dorobek modelu jest względny, a EV na planszy liczy surowe kroki. To dwa różne modele wartości. Dorobek względny = suma (niezapisane kroki tej tury na trasie / pełna długość tej trasy). Przykład: 3 kroki na trasie 6 i 2 na trasie 7 dają 3/11 + 2/13 ≈ 0,427. Nie obejmuje zapisanych kroków z poprzednich tur; nie jest liczbą szczytów ani szansą wygranej. Progi liczników pokazujemy jako ≤ k / ≥ k+1 — to równoważny zapis oryginalnego podziału modelu dla liczb całkowitych.`;
     $('model-metrics').before(scope);
     $('model-metrics').innerHTML=[['Rzuty treningowe',meta.rolls],['Symulowane partie',meta.games],['Węzły drzewa',meta.nodes],['Zgodność z heurystyką',meta.accuracy===undefined?'—':pct(meta.accuracy)]].map(([name,value])=>`<div><strong>${typeof value==='number'?fmt(value,0):esc(value??'—')}</strong><span>${name}</span></div>`).join('');
     $('model-inputs').innerHTML=(meta.features||defaults).map(f=>{
       const probability=['bust_risk','opponent_threat'].includes(f), continuous=probability||f==='turn_gain', max=probability?1:['own_claimed','opponent_claimed'].includes(f)?(meta.targetClaims||3):3;
       return `<label><span>${esc(names[f]||f)}<small>${esc(f)}</small></span><input type="number" data-feature="${esc(f)}" min="0" max="${max}" step="${continuous?'.01':'1'}" value="${f==='turn_gain'?'.4':'0'}" aria-label="${esc(names[f]||f)}"></label>`;
     }).join('');
-    $('model-inputs').querySelectorAll('input').forEach(input=>input.addEventListener('input',()=>{const n=Number(input.value);if(input.value!==''&&(n<Number(input.min)||n>Number(input.max)))input.value=Math.max(Number(input.min),Math.min(Number(input.max),n));updateModel();}));
+    $('model-inputs').querySelectorAll('input').forEach(input=>input.addEventListener('input',()=>{if(input.value!=='')input.value=normalizeFeature(input.dataset.feature,input.value,Number(input.max));updateModel();}));
     $('tree').innerHTML=treeHTML(model.tree);syncModel();updateModel();
   }
   $('sync-model').addEventListener('click',syncModel);

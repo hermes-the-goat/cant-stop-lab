@@ -1,4 +1,16 @@
 'use strict';
+const discreteFeatures=['own_claimed','opponent_claimed','summits_pending','free_markers'];
+require('node:test')('discrete thresholds use equivalent integer branches, continuous retain precision',()=>{
+  const {splitLabels,normalizeFeature}=require('./app.js');
+  const assert=require('node:assert/strict');
+  for(const f of discreteFeatures){
+    assert.deepEqual(splitLabels(f,1.5),{left:'≤ 1',right:'≥ 2'});
+    for(let x=0;x<=5;x++)assert.equal(x<=1.5,x<=1);
+    assert.equal(normalizeFeature(f,1.5,5),1);
+  }
+  assert.deepEqual(splitLabels('turn_gain',0.4265),{left:'≤ 0,427',right:'> 0,427'});
+  assert.equal(normalizeFeature('turn_gain',0.4265,3),0.4265);
+});
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
