@@ -17,6 +17,44 @@ function evaluate(rolls, selected, remaining, gain) {
   const p = successes / rolls.length, q = 1 - p, increment = steps / rolls.length;
   return {p, q, increment, rollEV: p * gain + increment, delta: increment - q * gain, threshold: q ? increment / q : Infinity};
 }
+const COLUMN_LENGTHS = [3,5,7,9,11,13,11,9,7,5,3];
+// One extra roll, then bank: units are full-column equivalents, not raw steps.
+function evaluateNormalized(rolls, selected, remaining) {
+  let successes = 0, total = 0;
+  for (const pairs of rolls) {
+    let best = 0;
+    for (const pair of pairs) {
+      const used = {}; let score = 0;
+      for (const n of pair) {
+        used[n] = (used[n] || 0) + 1;
+        if (selected.includes(n) && used[n] <= remaining[n]) score += 1 / COLUMN_LENGTHS[n-2];
+      }
+      best = Math.max(best, score);
+    }
+    if (best > 0) successes++;
+    total += best;
+  }
+  const p = successes / rolls.length, q = 1 - p, increment = total / rolls.length;
+  return {p, q, increment, threshold: q ? increment / q : Infinity,
+    meanBust: q ? 1 / q : Infinity,
+    medianBust: q === 0 ? Infinity : p === 0 ? 1 : Math.ceil(Math.log(.5) / Math.log(p))};
+}
+// Candidate capacities match accepting a suggestion: keep selected, reset new.
+function completeSelection(selected, remaining, cols) {
+  return {selected:[...cols], remaining:{...remaining,
+    ...Object.fromEntries(cols.map(n=>[n,selected.includes(n)?remaining[n]:COLUMN_LENGTHS[n-2]]))}};
+}
+function rankCompatibleTriples(rolls, selected, remaining) {
+  if(selected.length!==1 && selected.length!==2)return [];
+  const candidates=[];
+  for(let a=2;a<=10;a++)for(let b=a+1;b<=11;b++)for(let c=b+1;c<=12;c++) {
+    const cols=[a,b,c];
+    if(!selected.every(n=>cols.includes(n)))continue;
+    const candidate=completeSelection(selected,remaining,cols);
+    candidates.push({cols,...evaluateNormalized(rolls,cols,candidate.remaining)});
+  }
+  return candidates.sort((a,b)=>b.p-a.p || a.cols[0]-b.cols[0] || a.cols[1]-b.cols[1] || a.cols[2]-b.cols[2]).slice(0,5);
+}
 function pairDice([a,b,c,d]) { return [[a+b,c+d],[a+c,b+d],[a+d,b+c]]; }
 function predict(tree, values, features) {
   if (Number(values.own_claimed || 0) + Number(values.summits_pending || 0) >= 5) return {action:'STOP',path:[],forced:true};
@@ -40,12 +78,12 @@ function normalizeFeature(feature, value, max) {
   const n=Math.max(0,Math.min(max,Number(value)||0));
   return DISCRETE_FEATURES.includes(feature)?Math.floor(n):n;
 }
-if (typeof module !== 'undefined') module.exports = {evaluate, pairDice, predict, actionName, splitLabels, normalizeFeature};
+if (typeof module !== 'undefined') module.exports = {evaluate, evaluateNormalized, rankCompatibleTriples, completeSelection, pairDice, predict, actionName, splitLabels, normalizeFeature};
 
 if (typeof document !== 'undefined') {
   const $ = id => document.getElementById(id);
-  const lengths = [3,5,7,9,11,13,11,9,7,5,3];
-  const state = {selected:[6,7,8], remaining:Object.fromEntries(lengths.map((l,i)=>[i+2,l])), gain:4};
+  const lengths = COLUMN_LENGTHS;
+  const state = {selected:[], remaining:Object.fromEntries(lengths.map((l,i)=>[i+2,l]))};
   const defaults = ['turn_gain','bust_risk','summits_pending','own_claimed','opponent_claimed','opponent_threat','free_markers'];
   const names = {turn_gain:'Dorobek względny (Σ kroki / wysokość)',bust_risk:'Ryzyko wpadki',summits_pending:'Szczyty do bankowania',own_claimed:'Twoje zdobyte kolumny',opponent_claimed:'Kolumny przeciwnika',opponent_threat:'Największy względny postęp rywala',free_markers:'Wolne znaczniki'};
   let data, model, lastEvaluation;
@@ -77,7 +115,7 @@ if (typeof document !== 'undefined') {
       $('mountain').querySelector(`[data-col="${n}"]`).focus();
     }));
     $('selection-count').textContent=state.selected.length+' / 3 znaczniki';
-    $('selection-hint').textContent=state.selected.length===3?'Kliknij wybrany szlak, aby go zwolnić, potem wybierz nowy.':`Wybierz jeszcze ${3-state.selected.length} ${state.selected.length===2?'kolumnę':'kolumny'}. Analiza wymaga trzech zajętych znaczników.`;
+    $('selection-hint').textContent=state.selected.length===3?'Kliknij wybrany szlak, aby go zwolnić, potem wybierz nowy.':`Wybierz jeszcze ${3-state.selected.length} ${state.selected.length===2?'kolumnę':'kolumny'}. Przy 1–2 wybranych szlakach panel podpowiada TOP 5 dopełnień.`;
   }
   function drawRemaining() {
     $('remaining-inputs').innerHTML=state.selected.map(n=>`<label><span class="badge">${n}</span><input type="number" min="0" max="${lengths[n-2]}" value="${state.remaining[n]}" data-remaining="${n}" aria-label="Pozostałe pola w kolumnie ${n}"><span>/ ${lengths[n-2]}</span></label>`).join('');
@@ -94,20 +132,28 @@ if (typeof document !== 'undefined') {
   }
   function update() {
     if(!data)return;
-    if(state.selected.length!==3){lastEvaluation=null;$('decision').innerHTML='<div class="recommendation"><span class="verb">Wybierz 3 szlaki</span><p>Ten model zakłada, że wszystkie trzy znaczniki są zajęte.</p></div>';updateRisk();return;}
-    lastEvaluation=evaluate(data.rolls,state.selected,state.remaining,state.gain);
-    const r=lastEvaluation, delta=r.delta;
-    const verdict=Math.abs(delta)<1e-10?'Obojętność':delta>0?'Rzuć jeszcze raz':'Bankuj dorobek';
-    const reason=delta>0?`Jeden rzut dodaje średnio ${fmt(delta)} kroku względem bankowania.`:delta<0?`Jeden rzut kosztuje średnio ${fmt(-delta)} kroku względem bankowania.`:'Obie opcje mają taką samą oczekiwaną wartość krokową.';
-    $('decision').innerHTML=`<div class="recommendation"><span class="verdict-label">WERDYKT MODELU KROKOWEGO</span><strong class="verb">${verdict}</strong><p>${reason}</p></div><dl class="decision-stats"><div><dt>Ryzyko wpadki / rzut</dt><dd>${pct(r.q)}</dd></div><div><dt>Szansa legalnego kroku</dt><dd>${pct(r.p)}</dd></div><div><dt>Bankuj teraz</dt><dd>${fmt(state.gain)} kr.</dd></div><div><dt>Rzuć raz → bankuj (EV)</dt><dd>${fmt(r.rollEV)} kr.</dd></div><div><dt>E nowych kroków / rzut</dt><dd>${fmt(r.increment)} kr.</dd></div><div><dt>Próg dorobku g/q</dt><dd>${fmt(r.threshold)} kr.</dd></div></dl>`;
+    if(state.selected.length!==3){
+      lastEvaluation=null;
+      const suggestions=rankCompatibleTriples(data.rolls,state.selected,state.remaining);
+      if(!suggestions.length)$('decision').innerHTML='<div class="recommendation"><span class="verb">Wybierz 3 szlaki</span><p>Ten model zakłada, że wszystkie trzy znaczniki są zajęte.</p></div>';
+      else {
+        $('decision').innerHTML=`<div class="suggestion-heading"><h2>TOP 5 dopełnień</h2><p>najniższe ryzyko wpadki</p></div><p class="small-note">Trójki zawierają wszystkie wybrane kolumny. Liczymy stan po dopełnieniu: Twoje odległości zostają, nowe kolumny mają pełną długość. Remisy: rosnąco według numerów kolumn.</p><div class="suggestion-list">${suggestions.map((t,i)=>`<button type="button" class="suggestion" data-suggestion="${t.cols.join(',')}" aria-label="Dopełnij do kolumn ${t.cols.join(', ')}"><strong>${i+1}. ${t.cols.join(' · ')}</strong><span>Ryzyko wpadki / rzut <b>${pct(t.q)}</b></span><span>EV przyrostu względnego / rzut <b>${pct(t.increment)}</b></span><small>Wybierz trójkę ↗</small></button>`).join('')}</div><p class="small-note">EV przyrostu to bezwarunkowa średnia Σ (kroki / pełna długość kolumny), z zerem za wpadkę. To nie jest EV netto: nie podajesz faktycznego dorobku tury.</p>`;
+        $('decision').querySelectorAll('[data-suggestion]').forEach(button=>button.addEventListener('click',()=>{
+          Object.assign(state,completeSelection(state.selected,state.remaining,button.dataset.suggestion.split(',').map(Number)));
+          drawBoard();drawRemaining();update();
+          $('mountain').querySelector(`[data-col="${state.selected[0]}"]`).focus();
+        }));
+      }
+      updateRisk();return;
+    }
+    lastEvaluation=evaluateNormalized(data.rolls,state.selected,state.remaining);
+    const r=lastEvaluation;
+    const reason=r.q===1?'Brak legalnego kroku: kolejny rzut kończy się wpadką. Przy zerowym dorobku obie opcje mają wartość zero.':r.q===0?'Brak skończonego progu: w tym stanie kolejny rzut nie grozi wpadką.':'Powyżej progu bankowanie ma większą wartość oczekiwaną niż jeden dodatkowy rzut i bankowanie po sukcesie. Na progu: obojętność; poniżej: przewaga jednego rzutu.';
+    $('decision').innerHTML=`<div class="recommendation"><span class="verdict-label">Próg bankowania · dorobek względny</span><strong class="verb">${r.q===0?'∞':pct(r.threshold)}</strong><p>ekwiwalentu pełnej kolumny</p><p>${reason}</p></div><dl class="decision-stats"><div><dt>Ryzyko wpadki / rzut (q)</dt><dd>${pct(r.q)}</dd></div><div><dt>Szansa legalnego kroku (p)</dt><dd>${pct(r.p)}</dd></div><div><dt>E przyrostu względnego / rzut</dt><dd>${pct(r.increment)}</dd></div><div><dt>Średnia T · rzuty do wpadki</dt><dd>${fmt(r.meanBust)}</dd></div><div><dt>Mediana T · rzuty do wpadki</dt><dd>${fmt(r.medianBust,0)}</dd></div></dl><p class="small-note">T obejmuje rzut kończący się wpadką. Model geometryczny zamrożonego stanu: stałe p i q z obecnych odległości do szczytów, także po ich edycji. To nie prognoza zmieniającej się planszy.</p>`;
     updateRisk();
   }
-  function setGain(n){state.gain=clamp(n,0,100);$('turn-gain').value=state.gain;update();}
-  $('turn-gain').addEventListener('input',()=>setGain($('turn-gain').value));
-  $('gain-minus').addEventListener('click',()=>setGain(state.gain-1));
-  $('gain-plus').addEventListener('click',()=>setGain(state.gain+1));
   $('risk-n').addEventListener('input',updateRisk);
-  $('reset').addEventListener('click',()=>{state.selected=[6,7,8];lengths.forEach((l,i)=>state.remaining[i+2]=l);setGain(4);drawBoard();drawRemaining();update();});
+  $('reset').addEventListener('click',()=>{state.selected=[];lengths.forEach((l,i)=>state.remaining[i+2]=l);drawBoard();drawRemaining();update();});
   function useTriple(cols){state.selected=[...cols];cols.forEach(n=>state.remaining[n]=lengths[n-2]);drawBoard();drawRemaining();update();tab('board');window.scrollTo({top:0});}
   function drawSums() {
     const mode=$('partner-mode').value;
@@ -153,7 +199,7 @@ if (typeof document !== 'undefined') {
   }
   function drawModel() {
     const meta=model.meta||{};model.meta=meta;
-    const scope=document.createElement('p');scope.className='notice';scope.textContent=`Wariant treningowy: zwycięstwo po zdobyciu ${meta.targetClaims||3} kolumn (standardowo: 3). Dorobek modelu jest względny, a EV na planszy liczy surowe kroki. To dwa różne modele wartości. Dorobek względny = suma (niezapisane kroki tej tury na trasie / pełna długość tej trasy). Przykład: 3 kroki na trasie 6 i 2 na trasie 7 dają 3/11 + 2/13 ≈ 0,427. Nie obejmuje zapisanych kroków z poprzednich tur; nie jest liczbą szczytów ani szansą wygranej. Progi liczników pokazujemy jako ≤ k / ≥ k+1 — to równoważny zapis oryginalnego podziału modelu dla liczb całkowitych.`;
+    const scope=document.createElement('p');scope.className='notice';scope.textContent=`Wariant treningowy: zwycięstwo po zdobyciu ${meta.targetClaims||3} kolumn (standardowo: 3). Dorobek modelu i próg na planszy używają pełnych kolumn jako jednostki wartości. Plansza pokazuje procent tego ekwiwalentu, a wejście drzewa ułamek (np. 40% = 0,4). Plansza liczy dokładne EV jednego dodatkowego rzutu; drzewo imituje heurystykę rozgrywki. Próg nie jest faktycznym dorobkiem tury i nie jest kopiowany do drzewa. Dorobek względny = suma (niezapisane kroki tej tury na trasie / pełna długość tej trasy). Przykład: 3 kroki na trasie 6 i 2 na trasie 7 dają 3/11 + 2/13 ≈ 0,427. Nie obejmuje zapisanych kroków z poprzednich tur; nie jest liczbą szczytów ani szansą wygranej. Progi liczników pokazujemy jako ≤ k / ≥ k+1 — to równoważny zapis oryginalnego podziału modelu dla liczb całkowitych.`;
     $('model-metrics').before(scope);
     $('model-metrics').innerHTML=[['Rzuty treningowe',meta.rolls],['Symulowane partie',meta.games],['Węzły drzewa',meta.nodes],['Zgodność z heurystyką',meta.accuracy===undefined?'—':pct(meta.accuracy)]].map(([name,value])=>`<div><strong>${typeof value==='number'?fmt(value,0):esc(value??'—')}</strong><span>${name}</span></div>`).join('');
     $('model-inputs').innerHTML=(meta.features||defaults).map(f=>{
