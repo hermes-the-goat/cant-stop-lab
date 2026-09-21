@@ -123,6 +123,8 @@ test('partial selection shows five compatible options and accepting preserves ed
     assert.match(nodes.decision.innerHTML,/bezwarunkow/);
     assert.match(nodes.decision.innerHTML,/nie.*EV netto/);
     assert.deepEqual(buttons.map(b=>b.dataset.suggestion),ranked.map(t=>t.cols.join(',')));
+    const headings=[...nodes.decision.innerHTML.matchAll(/<strong>(.*?)<\/strong>/g)].map(m=>m[1]);
+    assert.deepEqual(headings,ranked.map(t=>t.cols.join(' · ')));
     const percent=n=>(n*100).toLocaleString('pl-PL',{minimumFractionDigits:1,maximumFractionDigits:1})+'%';
     for(const t of ranked){
       assert.ok(nodes.decision.innerHTML.includes(percent(t.q)));
